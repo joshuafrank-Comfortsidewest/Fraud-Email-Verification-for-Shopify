@@ -1,0 +1,19 @@
+{
+  "name": "shopify-risk-verification-emailer",
+  "version": "1.0.0",
+  "description": "Send verification emails for medium/high-risk Shopify orders",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "register:webhook": "node scripts/register-webhook.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "express": "^5.1.0",
+    "nodemailer": "^7.0.10"
+  }
+}
