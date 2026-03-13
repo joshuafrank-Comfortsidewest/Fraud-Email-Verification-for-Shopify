@@ -148,9 +148,6 @@ const ORDER_RISK_QUERY = `
       id
       name
       email
-      customer {
-        firstName
-      }
       risk {
         recommendation
         assessments {
@@ -174,7 +171,7 @@ function shouldRequestVerification(order) {
 }
 
 function buildEmailBody(order) {
-  const firstName = order?.customer?.firstName || "Customer";
+  const firstName = "Customer";
 
   return `Dear ${firstName},
 
