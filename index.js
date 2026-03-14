@@ -148,11 +148,27 @@ const ORDER_RISK_QUERY = `
       id
       name
       email
+      note
       risk {
         recommendation
         assessments {
           riskLevel
         }
+      }
+    }
+  }
+`;
+
+const ORDER_NOTE_UPDATE_MUTATION = `
+  mutation OrderNoteUpdateForVerification($input: OrderInput!) {
+    orderUpdate(input: $input) {
+      order {
+        id
+        note
+      }
+      userErrors {
+        field
+        message
       }
     }
   }
@@ -203,20 +219,68 @@ async function sendVerificationEmail(order) {
   const toEmail = SEND_TO_OVERRIDE || order?.email;
   if (!toEmail) {
     console.log(`Skipping ${order?.id || "unknown order"}: no customer email`);
-    return;
+    return {
+      status: "failed_no_email",
+      reason: "Verification email failed because no email was provided.",
+    };
   }
 
-  await transporter.sendMail({
-    from: FROM_EMAIL,
-    to: toEmail,
-    subject: "Verification Required for Your Recent Order",
-    text: buildEmailBody(order),
-    headers: {
-      "X-Category": "Need Verification",
-    },
-  });
+  try {
+    await transporter.sendMail({
+      from: FROM_EMAIL,
+      to: toEmail,
+      subject: "Verification Required for Your Recent Order",
+      text: buildEmailBody(order),
+      headers: {
+        "X-Category": "Need Verification",
+      },
+    });
+  } catch (error) {
+    const reason = String(error?.message || "unknown email transport error").replace(/\s+/g, " ").trim();
+    console.error(`Verification email failed for ${order?.name || order?.id || "order"}: ${reason}`);
+    return {
+      status: "failed_send_error",
+      reason: `Verification email failed: ${reason}`.slice(0, 500),
+    };
+  }
 
   console.log(`Verification email sent to ${toEmail} for ${order?.name || order?.id || "order"}`);
+  return {
+    status: "sent",
+    reason: "Verification Sent! Waiting on verification from customer",
+  };
+}
+
+async function appendVerificationOrderNote(order, noteMessage) {
+  if (!order?.id || !noteMessage) {
+    return false;
+  }
+
+  const timestamp = new Date().toISOString();
+  const line = `[Verification] ${timestamp} ${noteMessage}`;
+  const existing = String(order?.note || "").trim();
+  const note = existing ? `${existing}\n${line}` : line;
+
+  try {
+    const data = await shopifyGraphQL(ORDER_NOTE_UPDATE_MUTATION, {
+      input: {
+        id: order.id,
+        note,
+      },
+    });
+
+    const userErrors = data?.orderUpdate?.userErrors || [];
+    if (userErrors.length) {
+      console.error(`Order note update userErrors for ${order.id}: ${JSON.stringify(userErrors)}`);
+      return false;
+    }
+
+    order.note = data?.orderUpdate?.order?.note || note;
+    return true;
+  } catch (error) {
+    console.error(`Order note update failed for ${order.id}:`, error);
+    return false;
+  }
 }
 
 app.post("/webhooks/orders-risk", express.raw({ type: "application/json" }), async (req, res) => {
@@ -260,10 +324,17 @@ app.post("/webhooks/orders-risk", express.raw({ type: "application/json" }), asy
       return;
     }
 
-    await sendVerificationEmail(order);
-    sentOrderIds.add(order.id);
-    saveSentOrders(sentOrderIds);
-    res.status(200).send("OK");
+    const emailResult = await sendVerificationEmail(order);
+    await appendVerificationOrderNote(order, emailResult.reason);
+
+    if (emailResult.status === "sent") {
+      sentOrderIds.add(order.id);
+      saveSentOrders(sentOrderIds);
+      res.status(200).send("OK");
+      return;
+    }
+
+    res.status(200).send(`Handled: ${emailResult.status}`);
   } catch (error) {
     console.error("Webhook processing failed:", error);
     res.status(500).send("Webhook processing error");
