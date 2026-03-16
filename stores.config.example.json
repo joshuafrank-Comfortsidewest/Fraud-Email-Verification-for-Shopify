@@ -1,0 +1,51 @@
+{
+  "defaultApiVersion": "2026-01",
+  "stores": [
+    {
+      "shopDomain": "my-hvac-supplies.myshopify.com",
+      "apiVersion": "2026-01",
+      "adminAccessToken": "replace_with_hvac_admin_token",
+      "webhookSecret": "replace_with_hvac_app_secret",
+      "gmailUser": "sales@hvacsupplies.com",
+      "gmailAppPassword": "replace_with_hvac_gmail_app_password",
+      "fromEmail": "sales@hvacsupplies.com",
+      "supportEmail": "sales@hvacsupplies.com",
+      "brandName": "Hvac Supplies",
+      "statementPrefix": "SP HVACSUPPLIES",
+      "statementExampleCode": "9341",
+      "emailSignatureHtmlFile": "templates/signatures/hvac.html"
+    },
+    {
+      "shopDomain": "mkmjxz-00.myshopify.com",
+      "apiVersion": "2026-01",
+      "adminAccessToken": "",
+      "apiKey": "replace_with_olmo_api_key",
+      "apiSecret": "replace_with_olmo_api_secret",
+      "webhookSecret": "replace_with_olmo_app_secret",
+      "gmailUser": "support@olmohvac.com",
+      "gmailAppPassword": "replace_with_olmo_gmail_app_password",
+      "fromEmail": "support@olmohvac.com",
+      "supportEmail": "support@olmohvac.com",
+      "brandName": "OLMO HVAC",
+      "statementPrefix": "SP OLMOHVAC",
+      "statementExampleCode": "9341",
+      "emailSignatureHtmlFile": "templates/signatures/olmo.html"
+    },
+    {
+      "shopDomain": "0t1zks-zb.myshopify.com",
+      "apiVersion": "2026-01",
+      "adminAccessToken": "replace_with_bravo_admin_token",
+      "apiKey": "replace_with_bravo_api_key_if_needed",
+      "apiSecret": "replace_with_bravo_api_secret_if_needed",
+      "webhookSecret": "replace_with_bravo_app_secret",
+      "gmailUser": "sales@bravominisplit.com",
+      "gmailAppPassword": "replace_with_bravo_gmail_app_password",
+      "fromEmail": "sales@bravominisplit.com",
+      "supportEmail": "sales@bravominisplit.com",
+      "brandName": "BravoMiniSplit",
+      "statementPrefix": "SP BravoMiniSplit",
+      "statementExampleCode": "9341",
+      "emailSignatureHtmlFile": "templates/signatures/bravo.html"
+    }
+  ]
+}

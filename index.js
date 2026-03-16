@@ -2,66 +2,58 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import dotenv from "dotenv";
 import express from "express";
 import nodemailer from "nodemailer";
 
-dotenv.config();
+import { loadStoresConfig, normalizeShopDomain, resolveStore } from "./lib/store-config.js";
+import { shopifyGraphQL } from "./lib/shopify-client.js";
 
-const LOCAL_CONFIG_PATH = path.join(process.cwd(), "shopify_config.json");
 const SENT_ORDERS_PATH = path.join(process.cwd(), "sent-verification-orders.json");
 const PORT = Number(process.env.PORT || 3000);
-
-function loadLocalShopifyConfig() {
-  if (!fs.existsSync(LOCAL_CONFIG_PATH)) {
-    return {};
-  }
-
-  try {
-    return JSON.parse(fs.readFileSync(LOCAL_CONFIG_PATH, "utf8"));
-  } catch {
-    return {};
-  }
-}
-
-function stripProtocol(urlOrDomain = "") {
-  return urlOrDomain.replace(/^https?:\/\//i, "").replace(/\/$/, "");
-}
-
-const localShopifyConfig = loadLocalShopifyConfig();
-
-const SHOPIFY_SHOP_DOMAIN = stripProtocol(
-  process.env.SHOPIFY_SHOP_DOMAIN || localShopifyConfig.shop_url || ""
-);
-const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || localShopifyConfig.api_ver || "2025-04";
-const SHOPIFY_ADMIN_ACCESS_TOKEN = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN || localShopifyConfig.token || "";
-const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET || process.env.SHOPIFY_APP_SECRET || "";
-
-const GMAIL_USER = process.env.GMAIL_USER || "";
-const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD || "";
-const FROM_EMAIL = process.env.FROM_EMAIL || GMAIL_USER;
-const SUPPORT_EMAIL = process.env.SUPPORT_EMAIL || "sales@hvacsupplies.com";
 const SEND_TO_OVERRIDE = process.env.SEND_TO_OVERRIDE || "";
 
-if (!SHOPIFY_SHOP_DOMAIN || !SHOPIFY_ADMIN_ACCESS_TOKEN || !SHOPIFY_WEBHOOK_SECRET) {
-  console.error("Missing Shopify config. Set SHOPIFY_SHOP_DOMAIN, SHOPIFY_ADMIN_ACCESS_TOKEN, and SHOPIFY_APP_SECRET (or SHOPIFY_WEBHOOK_SECRET).");
-  process.exit(1);
-}
+const { stores, storeMap } = loadStoresConfig();
 
-if (!GMAIL_USER || !GMAIL_APP_PASSWORD || !FROM_EMAIL) {
-  console.error("Missing Gmail config. Set GMAIL_USER, GMAIL_APP_PASSWORD, FROM_EMAIL.");
+if (!stores.length) {
+  console.error("No stores configured. Provide stores.config.json or single-store env values.");
   process.exit(1);
 }
 
 const app = express();
+const transporterCache = new Map();
+const transporterVerified = new Set();
 
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: GMAIL_USER,
-    pass: GMAIL_APP_PASSWORD,
-  },
-});
+const ORDER_RISK_QUERY = `
+  query OrderRiskForVerificationEmail($id: ID!) {
+    order(id: $id) {
+      id
+      name
+      email
+      note
+      risk {
+        recommendation
+        assessments {
+          riskLevel
+        }
+      }
+    }
+  }
+`;
+
+const ORDER_NOTE_UPDATE_MUTATION = `
+  mutation OrderNoteUpdateForVerification($input: OrderInput!) {
+    orderUpdate(input: $input) {
+      order {
+        id
+        note
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
 
 function loadSentOrders() {
   if (!fs.existsSync(SENT_ORDERS_PATH)) {
@@ -98,18 +90,14 @@ function normalizeOrderGid(payload) {
   return `gid://shopify/Order/${String(raw).trim()}`;
 }
 
-function verifyWebhookHmac(rawBody, receivedHmac) {
-  if (!receivedHmac || !rawBody?.length) {
+function verifyWebhookHmac(rawBody, receivedHmac, secret) {
+  if (!receivedHmac || !rawBody?.length || !secret) {
     return false;
   }
 
-  const digest = crypto
-    .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
-    .update(rawBody)
-    .digest("base64");
-
-  const received = Buffer.from(receivedHmac, "utf8");
-  const expected = Buffer.from(digest, "utf8");
+  const digest = crypto.createHmac("sha256", secret).update(rawBody).digest("base64");
+  const received = Buffer.from(receivedHmac, "base64");
+  const expected = Buffer.from(digest, "base64");
 
   if (received.length !== expected.length) {
     return false;
@@ -117,62 +105,6 @@ function verifyWebhookHmac(rawBody, receivedHmac) {
 
   return crypto.timingSafeEqual(received, expected);
 }
-
-async function shopifyGraphQL(query, variables) {
-  const endpoint = `https://${SHOPIFY_SHOP_DOMAIN}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Shopify-Access-Token": SHOPIFY_ADMIN_ACCESS_TOKEN,
-    },
-    body: JSON.stringify({ query, variables }),
-  });
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`Shopify GraphQL failed (${response.status}): ${body}`);
-  }
-
-  const payload = await response.json();
-  if (payload.errors?.length) {
-    throw new Error(`Shopify GraphQL errors: ${JSON.stringify(payload.errors)}`);
-  }
-
-  return payload.data;
-}
-
-const ORDER_RISK_QUERY = `
-  query OrderRiskForVerificationEmail($id: ID!) {
-    order(id: $id) {
-      id
-      name
-      email
-      note
-      risk {
-        recommendation
-        assessments {
-          riskLevel
-        }
-      }
-    }
-  }
-`;
-
-const ORDER_NOTE_UPDATE_MUTATION = `
-  mutation OrderNoteUpdateForVerification($input: OrderInput!) {
-    orderUpdate(input: $input) {
-      order {
-        id
-        note
-      }
-      userErrors {
-        field
-        message
-      }
-    }
-  }
-`;
 
 function shouldRequestVerification(order) {
   const recommendation = order?.risk?.recommendation || "";
@@ -182,23 +114,54 @@ function shouldRequestVerification(order) {
     return true;
   }
 
-  const levels = (order?.risk?.assessments || []).map((a) => String(a?.riskLevel || "").toUpperCase());
+  const levels = (order?.risk?.assessments || []).map((assessment) => String(assessment?.riskLevel || "").toUpperCase());
   return levels.some((level) => level === "HIGH" || level === "MEDIUM");
 }
 
-function buildEmailBody(order) {
-  const firstName = "Customer";
+function renderTemplate(template, context) {
+  return template.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_match, token) => {
+    const value = context[token];
+    return value == null ? "" : String(value);
+  });
+}
 
-  return `Dear ${firstName},
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
 
-Thank you for placing an order with Hvac Supplies! To ensure the security of your purchase and prevent unauthorized transactions, we require additional verification for certain high-value or flagged orders.
+function buildEmailBody(order, store) {
+  const customerName = "Customer";
+  const statementPrefix = store.statementPrefix || "SP HVACSUPPLIES";
+  const statementExampleCode = String(store.statementExampleCode || "9341");
+
+  const context = {
+    customerName,
+    brandName: store.brandName || "Hvac Supplies",
+    supportEmail: store.supportEmail,
+    statementPrefix,
+    statementExampleCode,
+    statementExample: `${statementPrefix}${statementExampleCode}`,
+  };
+
+  if (store.customEmailBody) {
+    return renderTemplate(store.customEmailBody, context);
+  }
+
+  return `Dear ${context.customerName},
+
+Thank you for placing an order with ${context.brandName}! To ensure the security of your purchase and prevent unauthorized transactions, we require additional verification for certain high-value or flagged orders.
 
 To proceed, please verify the unique billing value associated with your order.
 
 Here's what you need to do:
 1. Check the billing statement for the card or bank account used for this purchase.
-2. Locate the transaction description that starts with SP HVACSUPPLIES.
-3. Provide the unique four-digit code listed at the end of this description (EXAMPLE: SP HVACSUPPLIES9341).
+2. Locate the transaction description that starts with ${context.statementPrefix}.
+3. Provide the unique four-digit code listed at the end of this description (EXAMPLE: ${context.statementExample}).
 
 Please reply to this email with the four-digit code within 48 hours. If we do not receive verification, your order will be cancelled for security purposes.
 
@@ -208,17 +171,51 @@ Why do we require this?
 - Multiple payment attempts
 - High-value orders or flagged transactions
 
-If you have any questions, contact our support team at ${SUPPORT_EMAIL}.
+If you have any questions, contact our support team at ${context.supportEmail}.
 
 Thank you for your understanding and cooperation.
 
 All the best!`;
 }
 
-async function sendVerificationEmail(order) {
+function buildEmailHtml(textBody, store) {
+  const textHtml = `<div style=\"font-family:Arial,sans-serif;font-size:14px;line-height:1.5;color:#222\">${escapeHtml(textBody).replace(/\n/g, "<br>")}</div>`;
+  if (!store.emailSignatureHtml) {
+    return textHtml;
+  }
+  return `${textHtml}<br><br>${store.emailSignatureHtml}`;
+}
+
+async function getTransporter(store) {
+  if (!store.gmailUser || !store.gmailAppPassword || !store.fromEmail) {
+    throw new Error(`Missing Gmail config for ${store.shopDomain}`);
+  }
+
+  const key = store.shopDomain;
+  if (!transporterCache.has(key)) {
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: {
+        user: store.gmailUser,
+        pass: store.gmailAppPassword,
+      },
+    });
+    transporterCache.set(key, transporter);
+  }
+
+  const transporter = transporterCache.get(key);
+  if (!transporterVerified.has(key)) {
+    await transporter.verify();
+    transporterVerified.add(key);
+  }
+
+  return transporter;
+}
+
+async function sendVerificationEmail(order, store) {
   const toEmail = SEND_TO_OVERRIDE || order?.email;
   if (!toEmail) {
-    console.log(`Skipping ${order?.id || "unknown order"}: no customer email`);
+    console.log(`Skipping ${store.shopDomain} ${order?.id || "unknown order"}: no customer email`);
     return {
       status: "failed_no_email",
       reason: "Verification email failed because no email was provided.",
@@ -226,34 +223,37 @@ async function sendVerificationEmail(order) {
   }
 
   try {
+    const transporter = await getTransporter(store);
+    const textBody = buildEmailBody(order, store);
+    const htmlBody = buildEmailHtml(textBody, store);
     await transporter.sendMail({
-      from: FROM_EMAIL,
+      from: store.fromEmail,
       to: toEmail,
-      subject: "Verification Required for Your Recent Order",
-      text: buildEmailBody(order),
+      subject: store.emailSubject,
+      text: textBody,
+      html: htmlBody,
       headers: {
-        "X-Category": "Need Verification",
+        "X-Category": store.emailCategory,
       },
     });
   } catch (error) {
     const reason = String(error?.message || "unknown email transport error").replace(/\s+/g, " ").trim();
-    console.error(`Verification email failed for ${order?.name || order?.id || "order"}: ${reason}`);
+    console.error(`Verification email failed for ${store.shopDomain} ${order?.name || order?.id || "order"}: ${reason}`);
     return {
       status: "failed_send_error",
       reason: `Verification email failed: ${reason}`.slice(0, 500),
     };
   }
 
-  console.log(`Verification email sent to ${toEmail} for ${order?.name || order?.id || "order"}`);
+  console.log(`Verification email sent to ${toEmail} for ${store.shopDomain} ${order?.name || order?.id || "order"}`);
   return {
     status: "sent",
     reason: "Verification Sent! Waiting on verification from customer",
   };
 }
 
-async function appendVerificationOrderNote(order, noteMessage) {
+async function appendVerificationOrderNote(order, noteMessage, store) {
   if (!order?.id || !noteMessage) {
-    console.log(`Order note skipped for ${order?.name || order?.id || "unknown order"}: missing order id or note message`);
     return false;
   }
 
@@ -263,7 +263,7 @@ async function appendVerificationOrderNote(order, noteMessage) {
   const note = existing ? `${existing}\n${line}` : line;
 
   try {
-    const data = await shopifyGraphQL(ORDER_NOTE_UPDATE_MUTATION, {
+    const data = await shopifyGraphQL(store, ORDER_NOTE_UPDATE_MUTATION, {
       input: {
         id: order.id,
         note,
@@ -272,25 +272,47 @@ async function appendVerificationOrderNote(order, noteMessage) {
 
     const userErrors = data?.orderUpdate?.userErrors || [];
     if (userErrors.length) {
-      console.log(`Order note update userErrors for ${order.id}: ${JSON.stringify(userErrors)}`);
+      console.log(`Order note update userErrors for ${store.shopDomain} ${order.id}: ${JSON.stringify(userErrors)}`);
       return false;
     }
 
     order.note = data?.orderUpdate?.order?.note || note;
-    console.log(`Order note updated for ${order?.name || order.id}`);
     return true;
   } catch (error) {
-    console.log(`Order note update failed for ${order.id}: ${String(error?.message || error)}`);
+    console.log(`Order note update failed for ${store.shopDomain} ${order.id}: ${String(error?.message || error)}`);
     return false;
   }
+}
+
+function makeSentOrderKey(store, orderId) {
+  return `${store.shopDomain}:${orderId}`;
+}
+
+function getStoreForRequest(req) {
+  const headerShop = normalizeShopDomain(req.get("x-shopify-shop-domain") || "");
+  if (headerShop) {
+    return resolveStore(storeMap, headerShop);
+  }
+
+  if (stores.length === 1) {
+    return stores[0];
+  }
+
+  return null;
 }
 
 app.post("/webhooks/orders-risk", express.raw({ type: "application/json" }), async (req, res) => {
   try {
     const topic = req.get("x-shopify-topic") || "";
     const hmac = req.get("x-shopify-hmac-sha256") || "";
+    const store = getStoreForRequest(req);
 
-    if (!verifyWebhookHmac(req.body, hmac)) {
+    if (!store) {
+      res.status(400).send("Unknown shop");
+      return;
+    }
+
+    if (!verifyWebhookHmac(req.body, hmac, store.webhookSecret)) {
       res.status(401).send("Invalid HMAC");
       return;
     }
@@ -308,7 +330,7 @@ app.post("/webhooks/orders-risk", express.raw({ type: "application/json" }), asy
       return;
     }
 
-    const data = await shopifyGraphQL(ORDER_RISK_QUERY, { id: orderGid });
+    const data = await shopifyGraphQL(store, ORDER_RISK_QUERY, { id: orderGid });
     const order = data?.order;
 
     if (!order) {
@@ -321,19 +343,20 @@ app.post("/webhooks/orders-risk", express.raw({ type: "application/json" }), asy
       return;
     }
 
-    if (sentOrderIds.has(order.id)) {
+    const sentKey = makeSentOrderKey(store, order.id);
+    if (sentOrderIds.has(sentKey)) {
       res.status(200).send("Ignored: verification already sent");
       return;
     }
 
-    const emailResult = await sendVerificationEmail(order);
-    const noteUpdated = await appendVerificationOrderNote(order, emailResult.reason);
+    const emailResult = await sendVerificationEmail(order, store);
+    const noteUpdated = await appendVerificationOrderNote(order, emailResult.reason, store);
     if (!noteUpdated) {
-      console.log(`Order note was not updated for ${order?.name || order.id}`);
+      console.log(`Order note was not updated for ${store.shopDomain} ${order?.name || order.id}`);
     }
 
     if (emailResult.status === "sent") {
-      sentOrderIds.add(order.id);
+      sentOrderIds.add(sentKey);
       saveSentOrders(sentOrderIds);
       res.status(200).send("OK");
       return;
@@ -347,15 +370,10 @@ app.post("/webhooks/orders-risk", express.raw({ type: "application/json" }), asy
 });
 
 app.get("/health", (_req, res) => {
-  res.status(200).json({ status: "ok" });
+  res.status(200).json({ status: "ok", stores: stores.map((store) => store.shopDomain) });
 });
 
-app.listen(PORT, async () => {
-  try {
-    await transporter.verify();
-    console.log(`SMTP ready. Listening on port ${PORT}`);
-  } catch (error) {
-    console.error("SMTP check failed:", error);
-    process.exit(1);
-  }
+app.listen(PORT, () => {
+  console.log(`Listening on port ${PORT}`);
+  console.log(`Configured stores: ${stores.map((store) => store.shopDomain).join(", ")}`);
 });

@@ -7,8 +7,10 @@
   "scripts": {
     "start": "node index.js",
     "register:webhook": "node scripts/register-webhook.js",
+    "register:webhooks": "node scripts/register-webhook.js --all",
     "test:risk": "node scripts/test-risk.js",
-    "test:email": "node scripts/send-test-email.js"
+    "test:email": "node scripts/send-test-email.js",
+    "token:get": "node scripts/get-admin-token.js"
   },
   "engines": {
     "node": ">=18"

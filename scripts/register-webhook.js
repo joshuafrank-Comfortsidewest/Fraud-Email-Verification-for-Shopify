@@ -1,40 +1,29 @@
-import fs from "node:fs";
-import path from "node:path";
+import { loadStoresConfig, normalizeShopDomain, resolveStore } from "../lib/store-config.js";
+import { shopifyGraphQL } from "../lib/shopify-client.js";
 
-import dotenv from "dotenv";
-
-dotenv.config();
-
-const LOCAL_CONFIG_PATH = path.join(process.cwd(), "shopify_config.json");
-
-function loadLocalShopifyConfig() {
-  if (!fs.existsSync(LOCAL_CONFIG_PATH)) {
-    return {};
-  }
-
-  try {
-    return JSON.parse(fs.readFileSync(LOCAL_CONFIG_PATH, "utf8"));
-  } catch {
-    return {};
-  }
-}
-
-function stripProtocol(urlOrDomain = "") {
-  return urlOrDomain.replace(/^https?:\/\//i, "").replace(/\/$/, "");
-}
-
-const localShopifyConfig = loadLocalShopifyConfig();
-
-const SHOPIFY_SHOP_DOMAIN = stripProtocol(
-  process.env.SHOPIFY_SHOP_DOMAIN || localShopifyConfig.shop_url || ""
-);
-const SHOPIFY_API_VERSION = process.env.SHOPIFY_API_VERSION || localShopifyConfig.api_ver || "2025-04";
-const SHOPIFY_ADMIN_ACCESS_TOKEN = process.env.SHOPIFY_ADMIN_ACCESS_TOKEN || localShopifyConfig.token || "";
 const WEBHOOK_CALLBACK_URL = process.env.WEBHOOK_CALLBACK_URL || "";
 
-if (!SHOPIFY_SHOP_DOMAIN || !SHOPIFY_ADMIN_ACCESS_TOKEN || !WEBHOOK_CALLBACK_URL) {
-  console.error("Missing config. Set SHOPIFY_SHOP_DOMAIN, SHOPIFY_ADMIN_ACCESS_TOKEN, WEBHOOK_CALLBACK_URL.");
-  process.exit(1);
+function parseArgs() {
+  const args = process.argv.slice(2);
+  const parsed = {
+    all: false,
+    shop: "",
+  };
+
+  for (let i = 0; i < args.length; i += 1) {
+    const value = args[i];
+    if (value === "--all") {
+      parsed.all = true;
+      continue;
+    }
+    if (value === "--shop" && args[i + 1]) {
+      parsed.shop = args[i + 1];
+      i += 1;
+      continue;
+    }
+  }
+
+  return parsed;
 }
 
 const mutation = `
@@ -53,31 +42,61 @@ mutation RegisterRiskWebhook($topic: WebhookSubscriptionTopic!, $webhookSubscrip
 }
 `;
 
-const variables = {
-  topic: "ORDERS_RISK_ASSESSMENT_CHANGED",
-  webhookSubscription: {
-    uri: WEBHOOK_CALLBACK_URL,
-    format: "JSON",
-  },
-};
-
-const endpoint = `https://${SHOPIFY_SHOP_DOMAIN}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`;
-const response = await fetch(endpoint, {
-  method: "POST",
-  headers: {
-    "Content-Type": "application/json",
-    "X-Shopify-Access-Token": SHOPIFY_ADMIN_ACCESS_TOKEN,
-  },
-  body: JSON.stringify({ query: mutation, variables }),
-});
-
-const json = await response.json();
-
-if (!response.ok || json.errors?.length || json.data?.webhookSubscriptionCreate?.userErrors?.length) {
-  console.error("Webhook registration failed:");
-  console.error(JSON.stringify(json, null, 2));
+if (!WEBHOOK_CALLBACK_URL) {
+  console.error("Missing WEBHOOK_CALLBACK_URL.");
   process.exit(1);
 }
 
-console.log("Webhook registered:");
-console.log(JSON.stringify(json.data.webhookSubscriptionCreate.webhookSubscription, null, 2));
+const args = parseArgs();
+const { stores, storeMap } = loadStoresConfig();
+
+if (!stores.length) {
+  console.error("No stores configured.");
+  process.exit(1);
+}
+
+let targetStores;
+if (args.shop) {
+  const store = resolveStore(storeMap, normalizeShopDomain(args.shop));
+  if (!store) {
+    console.error(`Store not found: ${args.shop}`);
+    process.exit(1);
+  }
+  targetStores = [store];
+} else if (args.all || stores.length > 1) {
+  targetStores = stores;
+} else {
+  targetStores = [stores[0]];
+}
+
+let failed = false;
+
+for (const store of targetStores) {
+  try {
+    const data = await shopifyGraphQL(store, mutation, {
+      topic: "ORDERS_RISK_ASSESSMENT_CHANGED",
+      webhookSubscription: {
+        uri: WEBHOOK_CALLBACK_URL,
+        format: "JSON",
+      },
+    });
+
+    const result = data?.webhookSubscriptionCreate;
+    if (result?.userErrors?.length) {
+      failed = true;
+      console.error(`Webhook registration userErrors for ${store.shopDomain}:`);
+      console.error(JSON.stringify(result.userErrors, null, 2));
+      continue;
+    }
+
+    console.log(`Webhook registered for ${store.shopDomain}:`);
+    console.log(JSON.stringify(result?.webhookSubscription, null, 2));
+  } catch (error) {
+    failed = true;
+    console.error(`Webhook registration failed for ${store.shopDomain}: ${String(error?.message || error)}`);
+  }
+}
+
+if (failed) {
+  process.exit(1);
+}
