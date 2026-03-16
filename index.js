@@ -253,6 +253,7 @@ async function sendVerificationEmail(order) {
 
 async function appendVerificationOrderNote(order, noteMessage) {
   if (!order?.id || !noteMessage) {
+    console.log(`Order note skipped for ${order?.name || order?.id || "unknown order"}: missing order id or note message`);
     return false;
   }
 
@@ -271,14 +272,15 @@ async function appendVerificationOrderNote(order, noteMessage) {
 
     const userErrors = data?.orderUpdate?.userErrors || [];
     if (userErrors.length) {
-      console.error(`Order note update userErrors for ${order.id}: ${JSON.stringify(userErrors)}`);
+      console.log(`Order note update userErrors for ${order.id}: ${JSON.stringify(userErrors)}`);
       return false;
     }
 
     order.note = data?.orderUpdate?.order?.note || note;
+    console.log(`Order note updated for ${order?.name || order.id}`);
     return true;
   } catch (error) {
-    console.error(`Order note update failed for ${order.id}:`, error);
+    console.log(`Order note update failed for ${order.id}: ${String(error?.message || error)}`);
     return false;
   }
 }
@@ -325,7 +327,10 @@ app.post("/webhooks/orders-risk", express.raw({ type: "application/json" }), asy
     }
 
     const emailResult = await sendVerificationEmail(order);
-    await appendVerificationOrderNote(order, emailResult.reason);
+    const noteUpdated = await appendVerificationOrderNote(order, emailResult.reason);
+    if (!noteUpdated) {
+      console.log(`Order note was not updated for ${order?.name || order.id}`);
+    }
 
     if (emailResult.status === "sent") {
       sentOrderIds.add(order.id);
