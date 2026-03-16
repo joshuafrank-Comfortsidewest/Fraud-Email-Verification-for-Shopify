@@ -142,6 +142,7 @@ function buildEmailBody(order, store) {
   const context = {
     customerName,
     brandName: store.brandName || "Hvac Supplies",
+    orderCodePrefix: store.orderCodePrefix || "",
     supportEmail: store.supportEmail,
     statementPrefix,
     statementExampleCode,
@@ -162,6 +163,7 @@ Here's what you need to do:
 1. Check the billing statement for the card or bank account used for this purchase.
 2. Locate the transaction description that starts with ${context.statementPrefix}.
 3. Provide the unique four-digit code listed at the end of this description (EXAMPLE: ${context.statementExample}).
+4. Please note: This four-digit code is from your bank transaction description and is not your ${context.orderCodePrefix ? `${context.orderCodePrefix}#` : "order reference"} or your order number.
 
 Please reply to this email with the four-digit code within 48 hours. If we do not receive verification, your order will be cancelled for security purposes.
 

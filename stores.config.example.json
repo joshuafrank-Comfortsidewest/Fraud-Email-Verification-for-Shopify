@@ -11,6 +11,7 @@
       "fromEmail": "sales@hvacsupplies.com",
       "supportEmail": "sales@hvacsupplies.com",
       "brandName": "Hvac Supplies",
+      "orderCodePrefix": "HS",
       "statementPrefix": "SP HVACSUPPLIES",
       "statementExampleCode": "9341",
       "emailSignatureHtmlFile": "templates/signatures/hvac.html"
@@ -27,6 +28,7 @@
       "fromEmail": "support@olmohvac.com",
       "supportEmail": "support@olmohvac.com",
       "brandName": "OLMO HVAC",
+      "orderCodePrefix": "OH",
       "statementPrefix": "SP OLMOHVAC",
       "statementExampleCode": "9341",
       "emailSignatureHtmlFile": "templates/signatures/olmo.html"
@@ -43,6 +45,7 @@
       "fromEmail": "sales@bravominisplit.com",
       "supportEmail": "sales@bravominisplit.com",
       "brandName": "BravoMiniSplit",
+      "orderCodePrefix": "BV",
       "statementPrefix": "SP BravoMiniSplit",
       "statementExampleCode": "9341",
       "emailSignatureHtmlFile": "templates/signatures/bravo.html"

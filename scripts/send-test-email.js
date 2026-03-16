@@ -30,6 +30,7 @@ function buildBody(store) {
   const statementPrefix = store.statementPrefix || "SP HVACSUPPLIES";
   const exampleCode = String(store.statementExampleCode || "9341");
   const example = `${statementPrefix}${exampleCode}`;
+  const orderCodePrefix = store.orderCodePrefix || "";
 
   return `Dear Customer,
 
@@ -41,6 +42,7 @@ Here's what you need to do:
 1. Check the billing statement for the card or bank account used for this purchase.
 2. Locate the transaction description that starts with ${statementPrefix}.
 3. Provide the unique four-digit code listed at the end of this description (EXAMPLE: ${example}).
+4. Please note: This four-digit code is from your bank transaction description and is not your ${orderCodePrefix ? `${orderCodePrefix}#` : "order reference"} or your order number.
 
 Please reply to this email with the four-digit code within 48 hours. If we do not receive verification, your order will be cancelled for security purposes.
 
