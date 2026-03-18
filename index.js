@@ -303,11 +303,34 @@ function getStoreForRequest(req) {
   return null;
 }
 
+function findStoreByHmac(rawBody, receivedHmac) {
+  if (!rawBody?.length || !receivedHmac) {
+    return [];
+  }
+
+  return stores.filter((store) => verifyWebhookHmac(rawBody, receivedHmac, store.webhookSecret));
+}
+
 app.post("/webhooks/orders-risk", express.raw({ type: "application/json" }), async (req, res) => {
   try {
     const topic = req.get("x-shopify-topic") || "";
+    const headerShop = normalizeShopDomain(req.get("x-shopify-shop-domain") || "");
     const hmac = req.get("x-shopify-hmac-sha256") || "";
-    const store = getStoreForRequest(req);
+    let store = getStoreForRequest(req);
+
+    if (!store) {
+      const hmacMatches = findStoreByHmac(req.body, hmac);
+      if (hmacMatches.length === 1) {
+        store = hmacMatches[0];
+        console.log(
+          `Resolved webhook store by HMAC fallback: ${store.shopDomain} (topic=${topic || "unknown"}, headerShop=${headerShop || "missing"})`,
+        );
+      } else {
+        console.log(
+          `Unknown shop for webhook (topic=${topic || "unknown"}, headerShop=${headerShop || "missing"}, configured=[${stores.map((s) => s.shopDomain).join(", ")}], hmacMatches=${hmacMatches.length})`,
+        );
+      }
+    }
 
     if (!store) {
       res.status(400).send("Unknown shop");
@@ -315,6 +338,9 @@ app.post("/webhooks/orders-risk", express.raw({ type: "application/json" }), asy
     }
 
     if (!verifyWebhookHmac(req.body, hmac, store.webhookSecret)) {
+      console.log(
+        `Invalid HMAC for ${store.shopDomain} (topic=${topic || "unknown"}, headerShop=${headerShop || "missing"})`,
+      );
       res.status(401).send("Invalid HMAC");
       return;
     }
